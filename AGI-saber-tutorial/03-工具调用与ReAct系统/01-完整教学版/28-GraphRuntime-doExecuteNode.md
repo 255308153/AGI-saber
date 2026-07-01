@@ -597,7 +597,7 @@ executor = "get_weather"
 node.params = {"city":"上海"}
 ```
 
-事件数据：
+事件、据：
 
 ```text
 type = "tool_call"

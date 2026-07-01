@@ -1639,7 +1639,148 @@ nodeResults = {
 }
 ```
 
-## 6. 两层 CountDownLatch 到底在等什么
+## 6. observation / observations 里面到底是什么
+
+这里有两个名字很像的东西：
+
+```text
+StreamEvent.observation   = 单个流式事件，发给前端看
+GraphResult.observations  = 字符串列表，发给 Generator 生成最终回答
+```
+
+它们不是同一个对象。
+
+**1. 单数 observation：给前端看的事件**
+
+源码位置：
+
+```java
+public static StreamEvent observation(String tool, String result) {
+    Map<String, Object> m = new LinkedHashMap<>();
+    m.put("tool", tool);
+    m.put("result", result);
+    return new StreamEvent("observation", m);
+}
+```
+
+所以一个 `observation` 事件里面就是：
+
+```text
+type = "observation"
+data = {
+  tool:   工具名或 agent 名,
+  result: 这次工具/agent 返回的原始结果字符串
+}
+```
+
+例如天气工具返回：
+
+```text
+{
+  type: "observation",
+  data: {
+    tool: "get_weather",
+    result: "上海：小雨 20°C"
+  }
+}
+```
+
+普通工具节点成功时，`doExecuteNode` 会立刻发：
+
+```java
+onEvent.accept(StreamEvent.observation(executor, result));
+```
+
+竞速节点不在 `doExecuteNode` 里立刻发，因为它还不确定自己是不是胜出者。竞速节点要等 `runRace` 确认胜出后才发：
+
+```java
+onEvent.accept(StreamEvent.observation(node.getToolName(), r.result));
+```
+
+这样前端不会看到“竞速失败者”的结果被当成有效 observation。
+
+**2. 复数 observations：给 Generator 用的结果列表**
+
+`GraphResult` 里有：
+
+```java
+public List<String> observations = new ArrayList<>();
+```
+
+这个列表在 `buildResult()` 里生成：
+
+```java
+r.observations = graph.successfulResults();
+```
+
+而 `successfulResults()` 的逻辑是：
+
+```java
+for (Node n : nodes.values()) {
+    if (n.getStatus() == NodeStatus.DONE
+            && n.getResult() != null
+            && !n.getResult().isEmpty()) {
+        results.add("[" + n.executorName() + "] " + n.getResult());
+    }
+}
+```
+
+所以 `GraphResult.observations` 里只放：
+
+```text
+状态是 DONE 的节点
+并且 result 非空
+格式是：[工具名或 agent 名] 结果
+```
+
+例如：
+
+```text
+observations = [
+  "[get_weather] 上海：小雨 20°C",
+  "[search_web] 雨天出行建议：带伞，路面湿滑注意通勤时间",
+  "[route_plan] 推荐地铁，避免骑行"
+]
+```
+
+不会放进去的节点：
+
+```text
+FAILED     -> 不放
+SKIPPED    -> 不放
+CANCELLED  -> 不放
+PENDING    -> 不放
+RUNNING    -> 不放
+DONE 但 result 为空 -> 不放
+```
+
+**3. observations 最后给谁用**
+
+`ReActLoop.runStream` 拿到图执行结果后，会调用：
+
+```java
+String answer = generator.generate(query, gr.observations, memPrefix, histMsgs);
+```
+
+`ChatGenerator.generate` 会把 observations 拼进提示词：
+
+```text
+工具执行结果：
+1. [get_weather] 上海：小雨 20°C
+2. [search_web] 雨天出行建议：带伞...
+3. [route_plan] 推荐地铁...
+```
+
+然后让 LLM 生成最终自然语言回答。
+
+所以可以记成：
+
+```text
+observation  = 一次工具结果事件，给前端实时展示
+observations = 所有成功节点结果列表，给 Generator 汇总回答
+```
+
+## 7. 两层 CountDownLatch 到底在等什么
 
 这部分是 `execute()` 最容易绕的地方。
 
@@ -1717,7 +1858,7 @@ innerLatch 解决“普通组内部所有节点都要完成”
 latch 解决“当前层所有组都要完成”
 ```
 
-## 7. 普通组和竞速组的区别
+## 8. 普通组和竞速组的区别
 
 同一层节点有两种执行方式。
 
@@ -1782,7 +1923,7 @@ enableRacing = true
 等这一层所有组结束
 ```
 
-### 7.1 普通节点、竞速节点、工具调用、参数怎么串起来
+### 8.1 普通节点、竞速节点、工具调用、参数怎么串起来
 
 这几个问题可以放在一条链路里看：
 
@@ -2086,7 +2227,7 @@ Node.params["query"] = "小雨出门建议"
   -> 返回搜索结果字符串
 ```
 
-## 8. 完整例子：跑一张 5 节点图
+## 9. 完整例子：跑一张 5 节点图
 
 假设 Planner 生成 5 个节点：
 
@@ -2276,7 +2417,7 @@ GraphResult {
 }
 ```
 
-## 9. 中断是怎么处理的
+## 10. 中断是怎么处理的
 
 `execute()` 里有 4 类中断路径。
 
@@ -2336,7 +2477,7 @@ if (cancelled.get()) {
 
 所以中断时也会尽量返回已完成节点的结果和未完成节点的状态。
 
-## 10. 事件推送发生在哪里
+## 11. 事件推送发生在哪里
 
 `execute()` 直接推送的事件只有一个：
 
@@ -2376,7 +2517,7 @@ observation(search_web)
 
 `execute()` 是调度总控，具体节点事件由节点执行逻辑发出。
 
-## 11. 位置
+## 12. 位置
 
 在整个 ReAct 图执行链路里，`execute()` 位于这里：
 
@@ -2415,7 +2556,7 @@ doExecuteNode()     = 真正调用工具或子 Agent
 buildResult()       = 汇总整图结果
 ```
 
-## 12. 常见误解
+## 13. 常见误解
 
 **误解一：`execute()` 是异步方法**
 
